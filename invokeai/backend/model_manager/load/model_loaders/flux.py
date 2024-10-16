@@ -39,6 +39,7 @@ from invokeai.backend.model_manager.config import (
     MainCheckpointConfig,
     MainGGUFCheckpointConfig,
     T5EncoderBnbQuantizedLlmInt8bConfig,
+    T5EncoderGGUFConfig,
     T5EncoderConfig,
     VAECheckpointConfig,
 )
@@ -152,6 +153,75 @@ class BnbQuantizedLlmInt8bCheckpointModel(ModelLoader):
         assert set(missing_keys) == {"encoder.embed_tokens.weight"}
         # Assert that the layers we expect to be shared are actually shared.
         assert model.encoder.embed_tokens.weight is model.shared.weight
+
+
+@ModelLoaderRegistry.register(base=BaseModelType.Any, type=ModelType.T5Encoder, format=ModelFormat.GGUFQuantized)
+class T5EncoderGGUFCheckpointModel(ModelLoader):
+    """Class to load main models."""
+
+    def _load_model(
+        self,
+        config: AnyModelConfig,
+        submodel_type: Optional[SubModelType] = None,
+    ) -> AnyModel:
+        if not isinstance(config, T5EncoderGGUFConfig):
+            raise ValueError("Only T5EncoderGGUFConfig models are currently supported here.")
+
+        match submodel_type:
+            case SubModelType.Tokenizer2:
+                return T5Tokenizer.from_pretrained(Path(config.path) / "tokenizer_2", max_length=512)
+            case SubModelType.TextEncoder2:
+                te2_model_path = Path(config.path) / "text_encoder_2"
+                model_config = AutoConfig.from_pretrained(te2_model_path)
+                with accelerate.init_empty_weights():
+                    model = AutoModelForTextEncoding.from_config(model_config)
+
+                state_dict_path = list(te2_model_path.glob("*.gguf"))[0]
+                sd = gguf_sd_loader(state_dict_path, compute_dtype=torch.bfloat16)
+
+                # llama.cpp T5 models have different key names
+                t5_key_mappings = {
+                    "enc.": "encoder.",
+                    ".blk.": ".block.",
+                    "token_embd": "shared",
+                    "output_norm": "final_layer_norm",
+                    "attn_q": "layer.0.SelfAttention.q",
+                    "attn_k": "layer.0.SelfAttention.k",
+                    "attn_v": "layer.0.SelfAttention.v",
+                    "attn_o": "layer.0.SelfAttention.o",
+                    "attn_norm": "layer.0.layer_norm",
+                    "attn_rel_b": "layer.0.SelfAttention.relative_attention_bias",
+                    "ffn_up": "layer.1.DenseReluDense.wi_1",
+                    "ffn_down": "layer.1.DenseReluDense.wo",
+                    "ffn_gate": "layer.1.DenseReluDense.wi_0",
+                    "ffn_norm": "layer.1.layer_norm",
+                }
+
+                new_sd = {}
+                for dict_key, dict_value in sd.items():
+                    for llama_key, transformers_key in t5_key_mappings.items():
+                        dict_key = dict_key.replace(llama_key,transformers_key)
+                    new_sd[dict_key] = dict_value
+
+                self._load_state_dict_into_t5(model, new_sd)
+
+                return model
+
+        raise ValueError(
+            f"Only Tokenizer and TextEncoder submodels are currently supported. Received: {submodel_type.value if submodel_type else 'None'}"
+        
+        )
+    @classmethod
+    def _load_state_dict_into_t5(cls, model: T5EncoderModel, state_dict: dict[str, torch.Tensor]):
+        # There is a shared reference to a single weight tensor in the model.
+        # Both "encoder.embed_tokens.weight" and "shared.weight" refer to the same tensor, so only the latter should
+        # be present in the state_dict.
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False, assign=True)
+        assert len(unexpected_keys) == 0
+        assert set(missing_keys) == {"encoder.embed_tokens.weight"}
+        # Assert that the layers we expect to be shared are actually shared.
+        assert model.encoder.embed_tokens.weight is model.shared.weight
+
 
 
 @ModelLoaderRegistry.register(base=BaseModelType.Any, type=ModelType.T5Encoder, format=ModelFormat.T5Encoder)

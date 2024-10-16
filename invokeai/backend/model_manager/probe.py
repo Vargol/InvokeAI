@@ -278,6 +278,8 @@ class ModelProbe(object):
                 return ModelType.IPAdapter
             elif key in {"emb_params", "string_to_param"}:
                 return ModelType.TextualInversion
+            elif key.startswith("enc."):
+                return ModelType.T5Encoder
 
         # diffusers-ti
         if len(ckpt) < 10 and all(isinstance(v, torch.Tensor) for v in ckpt.values()):
@@ -827,9 +829,12 @@ class T5EncoderFolderProbe(FolderProbeBase):
         path = self.model_path / "text_encoder_2"
         if (path / "model.safetensors.index.json").exists():
             return ModelFormat.T5Encoder
+        files = list(path.glob("*.gguf"))
+        if len(files) != 0:
+            return ModelFormat.GGUFQuantized
         files = list(path.glob("*.safetensors"))
         if len(files) == 0:
-            raise InvalidModelConfigException(f"{self.model_path.as_posix()}: no .safetensors files found")
+            raise InvalidModelConfigException(f"{self.model_path.as_posix()}: no .safetensors og .gguf files found")
 
         # shortcut: look for the quantization in the name
         if any(x for x in files if "llm_int8" in x.as_posix()):

@@ -21,6 +21,18 @@ def dequantize_and_run(func, args, kwargs):
     }
     return func(*dequantized_args, **dequantized_kwargs)
 
+def dequantize_and_run_linear(func, args, kwargs):
+    """A helper function for running math ops on GGMLTensor inputs.
+
+    Dequantizes the inputs, and runs the function.
+    """
+    dequantized_args = [a.get_dequantized_tensor() if hasattr(a, "get_dequantized_tensor") else a.to(torch.bfloat16)  for a in args]
+    dequantized_kwargs = {
+        k: v.get_dequantized_tensor() if hasattr(v, "get_dequantized_tensor") else v for k, v in kwargs.items()
+    }
+
+    return func(*dequantized_args, **dequantized_kwargs)
+
 
 def apply_to_quantized_tensor(func, args, kwargs):
     """A helper function to apply a function to a quantized GGML tensor, and re-wrap the result in a GGMLTensor.
@@ -52,7 +64,14 @@ GGML_TENSOR_OP_TABLE = {
     torch.ops.aten.t.default: dequantize_and_run,  # pyright: ignore
     torch.ops.aten.addmm.default: dequantize_and_run,  # pyright: ignore
     torch.ops.aten.mul.Tensor: dequantize_and_run,  # pyright: ignore
+    torch.ops.aten.embedding.default: dequantize_and_run,  # pyright: ignore
+    
 }
+
+if torch.backends.mps.is_available():
+    GGML_TENSOR_OP_TABLE.update(
+        {torch.ops.aten.linear.default: dequantize_and_run_linear}  # pyright: ignore
+    )
 
 
 class GGMLTensor(torch.Tensor):
